@@ -1,0 +1,176 @@
+#Elizabeth Blake
+#Last Updated: Febuary 16 2024
+
+```{r}
+
+if(!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(here, magrittr, folders, readr, dplyr, biscale, tidyr, stringr, purrr, knitr, ggplot2, mapview, ggmap, sf, tigris, tidyverse, sp, readr, patchwork, lubridate, data.table, zoo, RColorBrewer, geofacet, MetBrewer, drat, ggthemes, cowplot)
+
+addRepo("geanders")
+install.packages("hurricaneexposuredata")
+
+```
+
+```{r}
+
+treatmemtc_heat <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/treatmemtc_heat.csv")
+treatmemtc_wf <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/treatmemtc_wf.csv")
+treatmemtc_hurricane <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/treatmemtc_hurricane.csv")
+
+heat_county <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/heat_county_counts.csv")
+wf_county <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/wf_county_counts.csv")
+hurricane_county <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/hurricane_county_counts.csv")
+
+
+all_exposures <- left_join(heat_county, hurricane_county, by = "GEOID")
+all_exposures <- left_join(all_exposures, wf_county, by = "GEOID")
+
+counties <- counties()
+counties <- st_transform(counties, 5070)
+county_points <- st_centroid(counties)
+
+ggplot() +
+  geom_sf(data = counties) +
+  geom_sf(data = county_points)
+
+states <- states()
+states <- states %>% 
+  select(c(STATEFP, STUSPS))
+
+all_exposures <- left_join(all_exposures, counties, by = "GEOID")
+
+```
+
+
+```{r}
+
+# heat 
+treatmemtc_heat <- treatmemtc_heat %>% 
+   filter(!is.na(total_heat_wave) & total_heat_wave != 0)
+
+treatmemtc_heat_count <- treatmemtc_heat %>% 
+  group_by(STATEFP) %>% 
+  summarize(num_tc_heat = n())
+
+
+#hurricane 
+treatmemtc_hurricane <- treatmemtc_hurricane %>% 
+   filter(!is.na(num) & num != 0)
+
+treatmemtc_hurricane_count <- treatmemtc_hurricane %>% 
+  group_by(STATEFP) %>% 
+  summarize(num_tc_hurricane = n())
+
+# wf
+treatmemtc_wf <- treatmemtc_wf %>% 
+   filter(!is.na(num_mons_exposed) & num_mons_exposed != 0)
+
+treatmemtc_wf_count <- treatmemtc_wf %>% 
+  group_by(STATEFP) %>% 
+  summarize(num_tc_wf = n())
+
+climate_event_impacts <- left_join(states, treatmemtc_heat_count, by = "STATEFP")
+climate_event_impacts <- left_join(climate_event_impacts, treatmemtc_wf_count, by = "STATEFP")
+climate_event_impacts <- left_join(climate_event_impacts, treatmemtc_hurricane_count, by = "STATEFP")
+
+```
+
+
+```{r}
+
+climate_event_impacts_ns <- st_drop_geometry(climate_event_impacts)
+
+long_data <- pivot_longer(climate_event_impacts_ns, cols = -c(STATEFP, STUSPS), names_to = "variable", values_to = "value")
+
+long_data <- long_data %>% 
+  rename("code" = "STUSPS")
+
+```
+
+```{r}
+
+long_data %>% 
+ggplot(aes(x = variable, y = value, fill = variable)) +
+  geom_col() +
+  facet_geo(~ code, grid = "us_state_grid2") +
+  labs(title = "Number of Buprenorphine Practitioners that Experienced an Extreme Climate Event in 2018",  # Add your title here
+       y = "Number of Buprenorphine Practitioner") +  
+  theme_bw() + 
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 4),
+        legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.9, size = 10)) +
+  coord_flip() + 
+  scale_y_continuous(expand = c(0, 0), trans = "log10") +
+  scale_fill_manual(values = c("num_tc_wf" = "orange", "num_tc_heat" = "red", "num_tc_hurricane" = "#ADD8E6"),  # Change the colors of the bars here
+                    labels = c("num_tc_wf" = "Wildfire", "num_tc_heat" = "Heatwave", "num_tc_hurricane" = "Hurricane")) +  # Change the legend labels here
+  guides(fill = guide_legend(reverse = TRUE))
+
+
+ggsave("~/casey-cohort/projects/opioids_extreme_weather/maps/treatment_x_events_by_state.png", dpi=300, height=18, width=23, units="cm")
+
+```
+
+```{r}
+
+storm_winds<- hurricaneexposuredata::storm_winds
+hurricanes2018 <- storm_winds %>% 
+  filter(str_detect(storm_id, "2018")) %>% 
+  filter(vmax_sust >= 34)
+
+hurricanes2018 <- left_join(hurricanes2018, county_points, by = c("fips" = "GEOID"))
+
+```
+
+
+```{r}
+
+all_exposures$level_hw <- as.factor(all_exposures$level_hw)
+
+all_exposures$level_sw <- as.factor(all_exposures$level_sw)
+
+#biV 
+biv_data <- bi_class(all_exposures, x = level_hw, y = level_sw, dim = 4)
+
+
+```
+
+
+```{r}
+biv_map <- ggplot() +
+  geom_sf(data = biv_data %>% filter(!STATEFP.x %in% c("02", "15", "72", "78", "69", "60", "66")), mapping = aes(fill = bi_class, geometry = geometry), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet2", dim = 4) +
+  bi_theme(base_size = 10) +
+  theme(plot.title = element_text(face = "plain"),
+        plot.subtitle = element_text(face = "plain")) +
+  #geom_sf(data = hurricanes2018, aes(geometry = geometry, color = "  ")) +
+ # scale_color_manual(name = "Hurricanes 2018", values = "black") +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12))
+
+
+legend <- bi_legend(pal = "DkViolet2",
+                    dim = 4,
+                    xlab = "Heatwaves",
+                    ylab = "Smokewaves",
+                    size = 10)
+
+ggdraw() +
+  draw_plot(biv_map, 0, 0, 1, 1) 
+  # draw_plot(legend, x=0, y=0, 0.6, 0.2) +
+  # annotate("text", x = .277, y = .05, label = "0", size = 4, color = "white", fontface = "bold") + #base
+  # annotate("text", x = .277, y = .0845, label = "1-2", size = 4,color = "white", fontface = "bold" ) + # up1
+  # annotate("text", x = .277, y = .119, label = "3-4", size = 4, color = "white", fontface = "bold") + # up 2
+  # annotate("text", x = .277, y = .155, label = "4+", size = 4,color = "white", fontface = "bold") + # up 3
+  # annotate("text", x = .295, y = .05, label = "1-3", size = 4,color = "white", fontface = "bold") + # right 1
+  # annotate("text", x = .315, y = .05, label = "4-7", size = 4,color = "white", fontface = "bold") + # right 2
+  # annotate("text", x = .335, y = .05, label = "8+", size = 4, color = "white", fontface = "bold")  # right 3
+
+
+
+ggsave("~/casey-cohort/projects/opioids_extreme_weather/maps/biv_exposures.png", dpi=300, height=10, width=18, units="in")
+
+```
+
+

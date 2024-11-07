@@ -1,0 +1,203 @@
+```{r}
+
+if(!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(here, folders, readr, dplyr, tidyr, stringr, purrr, knitr, snakecase, ggplot2, ggmap, sf, tigris, tidyverse, sp, readr, biscale, drat, ggthemes, MetBrewer) 
+
+install.packages('hurricaneexposure')
+library(hurricaneexposuredata)
+
+# Hurricanes
+# https://cran.r-project.org/web/packages/hurricaneexposure/index.html 
+# https://github.com/geanders/hurricaneexposure 
+
+```
+
+```{r}
+
+counties <- counties()
+counties <- st_transform(counties, crs = 4326)
+zip <- zctas(year = 2017)
+zip <- st_transform(zip, crs = 4326)
+
+zipwcounty <- st_join(zip, counties)
+zipwcounty <- st_drop_geometry(zipwcounty)
+
+zip <- left_join(zip, zipwcounty, by = "ZCTA5CE10") 
+
+```
+
+
+```{r}
+
+# loading in data
+treatment_centers <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/locator_export.csv")
+nhgis <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/nhgis0004_ds262_20225_county.csv")
+treatment_centers <- st_as_sf(treatment_centers, coords = c("longitude", "latitude"), crs = 4326)
+
+# adding row number as clear unique identifier for treatment centers 
+treatment_centers <- treatment_centers %>% mutate(id = row_number())
+
+# join treatment centers to counties to get counties of treatment centers
+treatment_centers <- st_join(treatment_centers, counties)
+treatment_centers <- treatment_centers %>% 
+  select(c(id, addressId, GEOID, STATEFP, NAME, reachedPatientLimit))
+
+treatment_centers <- treatment_centers %>% drop_na(STATEFP)
+
+# drop point level geometry, group by geoid and count number of how treatment centers per county
+treatment_county_counts <- treatment_centers %>%
+  st_drop_geometry() %>% 
+  group_by(GEOID) %>%
+  summarize(num_treatmentscenters = n())
+
+# join county counts to us counties to get a US wide map of number of treatment centers by county 
+treatment_county_counts <- left_join(counties, treatment_county_counts, by = "GEOID")
+
+# cleaning up the treatment count df 
+treatment_county_counts <- treatment_county_counts %>% 
+  select(c(GEOID, STATEFP, NAME, num_treatmentscenters))
+
+# joining population counts to county level data
+treatment_county_counts <- left_join(treatment_county_counts, nhgis, by = c('GEOID' = 'TL_GEO_ID'))
+
+treatment_county_counts <- treatment_county_counts %>% 
+  select(c(GEOID, STATEFP, NAME, num_treatmentscenters, AQNFE001))
+
+# treatment_county_counts[is.na(treatment_county_counts)] <- 0
+treatment_county_counts <- treatment_county_counts %>% mutate(num_treatmentscenters = ifelse(is.na(num_treatmentscenters), 0, num_treatmentscenters))
+
+treatment_county_counts$centers_per_capita <- treatment_county_counts$num_treatmentscenters / treatment_county_counts$AQNFE001
+treatment_county_counts$centers_per_10000 <- treatment_county_counts$centers_per_capita * 10000
+
+  
+```
+
+
+```{r}
+
+hurricanes2018 <- storm_winds %>% 
+  filter(str_detect(storm_id, "2018")) %>% 
+  filter(vmax_sust >= 34)
+
+hurricanes2018 <- left_join(hurricanes2018, counties, by = c("fips" = "GEOID"))
+
+hurricanes2018_count <- hurricanes2018 %>% 
+  group_by(fips) %>%
+  summarize(num = n())
+
+treatment_centers <- left_join(treatment_centers, hurricanes2018_count, by = c("GEOID" = "fips"))
+treatment_county_count <- left_join(treatment_county_counts, hurricanes2018_count, by = c("GEOID" = "fips"))
+
+
+treatment_centers_ns <- st_drop_geometry(treatment_centers)
+write.csv(treatment_centers_ns, "~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/treatmemtc_hurricane.csv")
+
+treatment_county_count_ns <- st_drop_geometry(treatment_county_count)
+write_csv(treatment_county_count_ns, "~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/hurricane_county_counts.csv")
+```
+
+
+```{r}
+
+fema <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/IndividualsAndHouseholdsProgramValidRegistrations.csv") %>% 
+  select(c("incidentType", "declarationDate", "disasterNumber", "county", "damagedStateAbbreviation", "damagedCity", "damagedZipCode", "grossIncome", "ownRent", "homeOwnersInsurance", "floodInsurance", "ihpReferral", "ihpEligible", "ihpAmount", "fipAmount", "haReferral", "haEligible", "haAmount", "haStatus")) %>% 
+  filter(disasterNumber == 4399)
+
+fema_zip <- fema %>% 
+  group_by(damagedZipCode) %>%
+  summarize(num_claims = n())
+
+fema_zip <- left_join(fema_zip, zip, by = c("damagedZipCode" = "ZCTA5CE10"))
+
+```
+
+
+```{r}
+
+data("storm_winds")
+michael <- storm_winds %>%
+  filter(storm_id == "Michael-2018")
+
+michael <- left_join(michael, counties, by = c("fips" = "GEOID"))
+
+michael_34 <- michael %>% 
+  filter(vmax_sust >= 34)
+
+```
+
+
+
+```{r}
+
+ggplot() + 
+  geom_sf(data=counties %>% filter(STATEFP %in% c("01", "12", "13"))) + 
+  geom_sf(data = michael_34, aes(fill = vmax_sust, geometry=geometry)) +
+  geom_sf(data=treatment_centers %>% filter(STATEFP %in% c("01", "12", "13")), aes(color = "Treatment Centers"), size = .5) +
+  scale_color_manual(values = c("Treatment Centers" = "red"), name = NULL) +
+  theme_map() +
+  labs(title = "Max Sustained Wind Speed Experienced by County During Hurricane Michael 2018",
+       fill = "m/s") +
+  theme(plot.title = element_text(face = "plain", hjust = 0.5)) +
+  guides(fill = guide_colorbar(title = "Number of Claims"), color = guide_legend(title = NULL))
+
+ggsave("point_hurricane_vamx.png", path = "~/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+```
+
+
+```{r}
+fema_county <- fema_zip %>% 
+  group_by(GEOID) %>%
+  summarize(num_claims = sum(num_claims, na.rm = TRUE))
+fema_county <- left_join(fema_county, counties, by = "GEOID")
+
+summary(fema_county$num_claims)
+
+```
+
+
+```{r}
+demuth <-met_brew(name="Demuth")
+
+demuth <- c("#591c19", "#9b332b", "#b64f32", "#d39a2d", "#f7c267", "#b9b9b8", "#8b8b99", "#5d6174", "#41485f", "#262d42")
+
+
+state_outline <- states() %>% 
+  filter(STATEFP %in% c("01", "12", "13"))
+
+
+ggplot() + 
+  geom_sf(data=counties %>% filter(STATEFP %in% c("01", "12", "13")), aes(), lwd = .1)+ 
+  geom_sf(data=fema_county %>% filter(STATEFP %in% c("01", "12", "13")), aes(fill = num_claims, geometry = geometry)) +
+  geom_sf(data=treatment_centers %>% filter(STATEFP %in% c("01", "12", "13")), size = .3, color = "black") + 
+  MetBrewer::scale_fill_met_c(name = "Demuth")+
+  theme_map() +
+  labs(title = "Number of FEMA Claims by County from Hurricane Michael 2018",
+       fill = "Number of Claims") +
+  theme(plot.title = element_text(face = "plain", hjust = 0.5)) +
+  guides(fill = guide_colorbar(title = "Number of Claims"), color = guide_legend(title = NULL),
+         size = guide_legend(title = "Treatment Centers", override.aes = list(color = "black")))
+
+ggsave("point_hurricane_claims.png", path = "~/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+```
+
+
+```{r}
+
+ggplot() + 
+  geom_sf(data=zip %>% filter(STATEFP %in% c("01", "12", "13")), aes(), lwd = .1)+ 
+  geom_sf(data=fema_zip %>% filter(STATEFP %in% c("01", "12", "13")), aes(fill = num_claims, geometry = geometry)) +
+  geom_sf(data=treatment_centers %>% filter(STATEFP %in% c("01", "12", "13")), size = .3, color = "black") + 
+  MetBrewer::scale_fill_met_c(name = "Demuth")+
+  theme_map() +
+  labs(title = "Number of FEMA Claims by Zipcode from Hurricane Michael 2018",
+       fill = "Number of Claims") +
+  theme(plot.title = element_text(face = "plain", hjust = 0.5)) +
+  guides(fill = guide_colorbar(title = "Number of Claims"), color = guide_legend(title = NULL))
+
+
+
+```
+
+

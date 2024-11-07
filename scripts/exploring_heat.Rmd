@@ -1,0 +1,245 @@
+```{r}
+
+if(!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(here, folders, readr, dplyr, tidyr, stringr, purrr, knitr, snakecase, ggplot2, usmap, tidygeocoder, mapview, ggmap, sf, tigris, maptools, MetBrewer, maps, tidyverse, sp, readr, biscale, patchwork, cowplot)
+
+```
+
+```{r}
+
+# loading in data
+treatment_centers <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/locator_export.csv")
+treatment_centers <- st_as_sf(treatment_centers, coords = c("longitude", "latitude"), crs = 4269)
+
+
+heat_wave_info <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/heat_wave_tracker.csv")
+
+us_counties <- counties()
+us_counties <- st_transform(us_counties, crs = 4269)
+
+nhgis <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/nhgis0004_ds262_20225_county.csv")
+
+heatpal <- c("#000000", "#FFFF00", "#FFAA00","#FF0000")
+
+# ggplot() + geom_sf(data = us_counties %>% filter(!STATEFP %in% c("02", "15", "72", "78", "69", "60", "66")))
+# ggplot() + geom_sf(data = treatment_centers)
+
+```
+
+```{r}
+
+# adding row number as clear unique identifier for treatment centers 
+treatment_centers <- treatment_centers %>% mutate(id = row_number())
+
+# join treatment centers to counties to get counties of treatment centers
+treatment_centers <- st_join(treatment_centers, us_counties)
+treatment_centers <- treatment_centers %>% 
+  select(c(id, addressId, GEOID, STATEFP, NAME, reachedPatientLimit))
+
+# drop point level geometry, group by geoid and count number of how treatment centers per county
+treatment_county_counts <- treatment_centers %>%
+  st_drop_geometry() %>% 
+  group_by(GEOID) %>%
+  summarize(num_treatmentscenters = n())
+
+# join county counts to us counties to get a US wide map of number of treatment centers by county 
+treatment_county_counts <- left_join(us_counties, treatment_county_counts, by = "GEOID")
+
+# cleaning up the treatment count df 
+treatment_county_counts <- treatment_county_counts %>% 
+  select(c(GEOID, STATEFP, NAME, num_treatmentscenters))
+
+# joining population counts to county level data
+treatment_county_counts <- left_join(treatment_county_counts, nhgis, by = c('GEOID' = 'TL_GEO_ID'))
+
+treatment_county_counts <- treatment_county_counts %>% 
+  select(c(GEOID, STATEFP, NAME, num_treatmentscenters, AQNFE001))
+
+# treatment_county_counts[is.na(treatment_county_counts)] <- 0
+treatment_county_counts <- treatment_county_counts %>% mutate(num_treatmentscenters = ifelse(is.na(num_treatmentscenters), 0, num_treatmentscenters))
+
+treatment_county_counts$centers_per_capita <- treatment_county_counts$num_treatmentscenters / treatment_county_counts$AQNFE001
+treatment_county_counts$centers_per_10000 <- treatment_county_counts$centers_per_capita * 10000
+
+# ggplot() + geom_sf(data=treatment_county_counts %>%  filter (!STATEFP %in% c("02", "15", "72", "78", "69", "60", "66")), aes(fill = centers_per_10000))
+
+```
+
+```{r}
+
+heat_wave_info <- heat_wave_info %>% 
+  filter(year %in% 2018) %>% 
+  rename("GEOID" = "fips")
+
+heat_wave_info <- left_join(us_counties, heat_wave_info, by = "GEOID")
+
+heat_wave_info <- heat_wave_info %>% 
+  select(c(GEOID, STATEFP, NAME, year, total_heat_wave, geometry))
+
+heat_wave_info <- st_drop_geometry(heat_wave_info)
+
+```
+
+
+```{r}
+
+treatment_centers <- left_join(treatment_centers, heat_wave_info, by = c("GEOID", "STATEFP", "NAME"))
+treatment_county_counts <- left_join(treatment_county_counts, heat_wave_info, by = c("GEOID", "STATEFP", "NAME"))
+
+treatment_centers <- treatment_centers %>% drop_na(STATEFP)
+
+```
+
+```{r}
+
+treatment_centers <- treatment_centers %>% mutate(total_heat_wave = ifelse(is.na(total_heat_wave), 0, total_heat_wave))
+
+# summary
+#   Min.     1st Qu.  Median. Mean  3rd Qu.   Max. 
+#   0.000   5.000   6.000   5.899   7.000  15.000 
+  
+
+treatment_centers <- treatment_centers %>% mutate(level_hw = case_when(
+                                             total_heat_wave==0 ~ 0, 
+                                             total_heat_wave==1 | total_heat_wave==2 | total_heat_wave==3 | total_heat_wave==4 ~ 1,
+                                             total_heat_wave==5 | total_heat_wave==6 | total_heat_wave==7 ~ 2,
+                                             total_heat_wave>=8 ~ 3))
+ 
+treatment_centers$level_hw <- factor(treatment_centers$level_hw, levels=c(0,1,2,3), labels=c("0", "1-4", "5-17", "8+"))
+
+treatment_centers <- st_transform(treatment_centers, 5070)
+us_counties <- st_transform(us_counties, 5070)
+
+```
+
+
+```{r}
+
+point_heat <- ggplot() + 
+  geom_sf(data = us_counties %>% filter(!STATEFP %in% c("02", "15", "72", "78", "69", "60", "66"))) +
+  geom_point(data = treatment_centers %>% filter(!STATEFP %in% c("02", "15", "72", "78", "69", "60", "66")), 
+             aes(x = st_coordinates(geometry)[, 1], 
+                 y = st_coordinates(geometry)[, 2], 
+                 size = level_hw,
+                 colour = level_hw)) +
+  scale_size_manual(values = c(.10, .25, 1, 1.75)) + 
+  scale_color_manual(values = heatpal) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, size = 20)) +
+  labs(title = "Number of Heatwaves Experienced by Buprenorphine Practitioner in 2018")
+
+ggsave("point_heat.png", path = "/Volumes/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+
+```
+
+```{r}
+treatment_county_counts <- treatment_county_counts %>% mutate(total_heat_wave = ifelse(is.na(total_heat_wave), 0, total_heat_wave))
+treatment_county_counts <- treatment_county_counts %>% mutate(centers_per_10000 = ifelse(is.na(centers_per_10000), 0, centers_per_10000))
+
+treatment_county_counts$total_heat_wave <- round(treatment_county_counts$total_heat_wave, digits = 0)
+treatment_county_counts$centers_per_10000 <- round(treatment_county_counts$centers_per_10000, digits = 0)
+```
+
+
+```{r}
+
+# summary(treatment_county_counts$total_heat_wave)
+#     Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#    0.000   4.000   6.000   5.446   7.000  15.000 
+
+# Levels 
+# 0
+# 1-3
+# 4-7
+# 8+
+
+treatment_county_counts <- treatment_county_counts %>% mutate(level_hw = case_when(total_heat_wave==0 ~ 0,
+                                             total_heat_wave==1 | total_heat_wave==2 | total_heat_wave==3 ~ 1,
+                                             total_heat_wave==4 | total_heat_wave==5 | total_heat_wave==6 | total_heat_wave==7 ~ 2,
+                                             total_heat_wave>=8 ~ 3))
+ 
+treatment_county_counts$level_hw <- factor(treatment_county_counts$level_hw, levels=c(0,1,2,3), labels=c("0", "1-3", "4-7", "8+"))
+
+
+# summary(treatment_county_counts$centers_per_10000)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  0.000   0.000   1.000   1.075   2.000  19.000 
+
+# Levels 
+# 0
+# 1
+# 2-3
+# 4+
+
+treatment_county_counts <- treatment_county_counts %>% mutate(level_tc = case_when(centers_per_10000==0 ~ 0,
+                                             centers_per_10000==1  ~ 1,
+                                             centers_per_10000==2 | centers_per_10000==3 ~ 2,
+                                             centers_per_10000>4 ~ 3))
+ 
+treatment_county_counts$level_tc <- factor(treatment_county_counts$level_tc, levels=c(0,1,2,3), labels=c("0", "1", "2-3", "4+"))
+
+```
+
+```{r}
+
+treatment_county_counts_ns <- st_drop_geometry(treatment_county_counts) 
+write_csv(treatment_county_counts_ns, "~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/heat_county_counts.csv")
+
+```
+
+
+```{r}
+#biV 
+biv_data <- bi_class(treatment_county_counts, x = level_tc, y = level_hw, dim = 4)
+
+biv_data <- st_transform(biv_data, 5070)
+
+```
+
+
+```{r}
+biv_map <- ggplot() +
+  geom_sf(data = biv_data %>% filter(!STATEFP %in% c("02", "15", "72", "78", "69", "60", "66")), mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet2", dim = 4, flip_axes = TRUE) +
+  bi_theme(base_size = 10) +
+  labs(title = "Number of Heatwaves Experienced x Number of Buprenorphine Practitioners in 2018", size = 50) +
+  theme(plot.title = element_text(face = "plain")) 
+
+legend <- bi_legend(pal = "DkViolet2",
+                    dim = 4,
+                    xlab = "Number of Buprenorphine Practitioners",
+                    ylab = "Number of Heatwaves",
+                    size = 6,
+                    flip_axes = TRUE)
+
+finalPlot <- ggdraw() +
+  draw_plot(biv_map, 0, 0, 1, 1) 
+  # draw_plot(legend, x=0, y=0, 0.6, 0.2) 
+  # annotate("text", x = .2735, y = .0452, label = "0", size = 2) + #base
+  # annotate("text", x = .2735, y = .0845, label = "1-3", size = 2) + #heat
+  # annotate("text", x = .2735, y = .119, label = "4-7", size = 2) + #heat
+  # annotate("text", x = .2735, y = .15, label = "8+", size = 2) + #heat
+  # annotate("text", x = .292, y = .045, label = "1", size = 2) + #TC
+  # annotate("text", x = .313, y = .045, label = "2-3", size = 2) + #TC
+  # annotate("text", x = .333, y = .045, label = "4+", size = 2) #TC 
+
+
+ggsave("biv_heat.png", path = "/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+```
+
+
+```{r}
+
+treatment_centers_ns <- st_drop_geometry(treatment_centers)
+write.csv(treatment_centers_ns, "~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/treatmemtc_heat.csv")
+
+```
+

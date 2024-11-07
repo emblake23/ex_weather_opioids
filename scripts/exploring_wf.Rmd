@@ -1,0 +1,387 @@
+#Elizabeth Blake
+#Last Updated: Febuary 16 2024
+
+```{r}
+
+if(!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(here, folders, readr, dplyr, tidyr, stringr, purrr, knitr, snakecase, ggplot2, usmap, tidygeocoder, mapview, ggmap, sf, tigris, maptools, MetBrewer, maps, tidyverse, sp, readr, biscale, patchwork, cowplot, lubridate, data.table, zoo, viridis, RColorBrewer)
+
+```
+
+```{r}
+
+# Load smokePM predictions on smoke days
+preds = readRDS("~/casey-cohort/projects/opioids_extreme_weather/data/PM2.5/smokePM2pt5_predictions_daily_county_20060101-20201231.rds")
+
+# load counties 
+counties <- counties() %>% 
+  filter(STATEFP %in% c("53", "41", "06", "16", "32", "04", "49", "30", "56", "08", "35"))
+
+# Load full set of dates
+dates = seq.Date(ymd("20180101"), ymd("20181231"), by = "day")
+
+# Get full combination of county-days
+# Warning: this may require a large amount of memory
+out = expand.grid(GEOID = counties$GEOID, date = dates)
+
+# Match smokePM predictions on smoke days to county-days
+out = left_join(out, preds, by = c("GEOID", "date"))
+
+# Predict 0 for remaining county-days, which are non-smoke days
+out = mutate(out, smokePM_pred = replace_na(smokePM_pred, 0))
+
+out <- out %>%
+  mutate(year = year(date)) %>%
+  mutate(month = month(date))
+
+rm(preds)
+
+```
+
+
+```{r}
+
+# loading in data
+treatment_centers <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/locator_export.csv")
+nhgis <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/nhgis0004_ds262_20225_county.csv")
+treatment_centers <- st_as_sf(treatment_centers, coords = c("longitude", "latitude"), crs = 4326)
+counties <- st_transform(counties, crs = 4326)
+
+# adding row number as clear unique identifier for treatment centers 
+treatment_centers <- treatment_centers %>% mutate(id = row_number())
+
+# join treatment centers to counties to get counties of treatment centers
+treatment_centers <- st_join(treatment_centers, counties)
+treatment_centers <- treatment_centers %>% 
+  select(c(id, addressId, GEOID, STATEFP, NAME, reachedPatientLimit)) %>% 
+  filter(STATEFP %in% c("53", "41", "06", "16", "32", "04", "49", "30", "56", "08", "35"))
+
+```
+
+
+```{r}
+
+# drop point level geometry, group by geoid and count number of how treatment centers per county
+treatment_county_counts <- treatment_centers %>%
+  st_drop_geometry() %>% 
+  group_by(GEOID) %>%
+  summarize(num_treatmentscenters = n())
+
+# join county counts to us counties to get a US wide map of number of treatment centers by county 
+treatment_county_counts <- left_join(counties, treatment_county_counts, by = "GEOID")
+
+# cleaning up the treatment count df 
+treatment_county_counts <- treatment_county_counts %>% 
+  select(c(GEOID, STATEFP, NAME, num_treatmentscenters))
+
+# joining population counts to county level data
+treatment_county_counts <- left_join(treatment_county_counts, nhgis, by = c('GEOID' = 'TL_GEO_ID'))
+
+treatment_county_counts <- treatment_county_counts %>% 
+  select(c(GEOID, STATEFP, NAME, num_treatmentscenters, AQNFE001))
+
+# treatment_county_counts[is.na(treatment_county_counts)] <- 0
+treatment_county_counts <- treatment_county_counts %>% mutate(num_treatmentscenters = ifelse(is.na(num_treatmentscenters), 0, num_treatmentscenters))
+
+treatment_county_counts$centers_per_capita <- treatment_county_counts$num_treatmentscenters / treatment_county_counts$AQNFE001
+treatment_county_counts$centers_per_10000 <- treatment_county_counts$centers_per_capita * 10000
+
+
+
+```
+
+
+```{r}
+
+
+########## Average PM2.5 Concentrations ###########
+
+
+# monthly avg
+monthPM <- out %>% 
+  group_by(GEOID, year, month) %>% 
+  summarize(avg_mon_pm = mean(smokePM_pred))
+
+# 2018 average 
+yearPM <- out %>%
+  group_by(GEOID, year) %>%
+  summarise(avg_yr_pm = mean(smokePM_pred))
+
+
+# treatment centers level factors 
+treatment_centers <- left_join(treatment_centers, yearPM, by = "GEOID")
+
+summary(treatment_centers$avg_yr_pm)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.04165 0.32825 1.07093 1.42122 1.80430 8.26264 
+
+treatment_centers <- treatment_centers %>% mutate(level_pm = case_when(
+                                             avg_yr_pm>= 0 & avg_yr_pm< .3 ~ 0, 
+                                             avg_yr_pm>= .3 & avg_yr_pm< 1 ~ 1,
+                                             avg_yr_pm>= 1 & avg_yr_pm< 2 ~ 2,
+                                             avg_yr_pm>= 2 & avg_yr_pm< 4 ~ 3,
+                                             avg_yr_pm>= 4.0 ~ 4))
+ 
+treatment_centers$level_pm <- factor(treatment_centers$level_pm, levels=c(0,1,2,3,4), labels=c("0-0.3", ".3-1", "1-2", "2-4", "4+"))
+
+
+# county level factors 
+treatment_county_counts <- left_join(treatment_county_counts, yearPM, by = "GEOID")
+
+summary(treatment_county_counts$avg_yr_pm)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.04165 0.72868 1.30880 1.54751 1.84663 8.26264 
+
+treatment_county_counts <- treatment_county_counts %>% mutate(level_pm = case_when(
+                                             avg_yr_pm>= 0 & avg_yr_pm< .3 ~ 0, 
+                                             avg_yr_pm>= .3 & avg_yr_pm< 1 ~ 1,
+                                             avg_yr_pm>= 1 & avg_yr_pm< 2 ~ 2,
+                                             avg_yr_pm>= 2 & avg_yr_pm< 4 ~ 3,
+                                             avg_yr_pm>= 4.0 ~ 4))
+ 
+treatment_county_counts$level_pm <- factor(treatment_county_counts$level_pm, levels=c(0,1,2,3,4), labels=c("0-0.3", ".3-1", "1-2", "2-4", "4+"))
+
+
+
+```
+
+
+```{r}
+
+########## Exposure PM2.5 ###########
+
+# Monthly avg PM2.5 > 5 ug/m3 = exposed
+
+monthPM <- monthPM %>% 
+  mutate(exposed = ifelse(avg_mon_pm > 5, 1, 0)) 
+
+#number of months of the year in which the monthly avg was over 5 
+freq_yr_wfpm <- monthPM %>% 
+  group_by(GEOID) %>% 
+  summarize(num_mons_exposed = sum(exposed))
+
+treatment_centers <- left_join(treatment_centers, freq_yr_wfpm, by = "GEOID")
+treatment_county_counts <- left_join(treatment_county_counts, freq_yr_wfpm, by = "GEOID")
+
+```
+
+
+
+```{r}
+
+########## Smoke Waves ##########
+
+# Number of smoke waves: Defined as >=2 days over the study area with wf pm2.5 >15 ug/m3
+
+out <- out %>% 
+  mutate(flag = ifelse(smokePM_pred > 15, 1, 0)) # Change threshold here, as needed  
+
+  
+smoke_waves <- out %>% 
+  arrange(GEOID, date) %>% 
+  mutate(variable_2 = ifelse((lag(flag, default = 0) == 1 | lead(flag, default = 0) == 1) & flag==1, 1, 0)) %>% 
+  mutate(smoke_wave_group = cumsum(variable_2 == 1 & lag(variable_2 == 0, default = FALSE))) %>% 
+  mutate(smoke_wave_group = ifelse(variable_2 == 0, 0, smoke_wave_group))
+
+
+smoke_waves_count <- smoke_waves %>% 
+  group_by(GEOID) %>% 
+  summarise(number_of_smoke_waves = n_distinct(smoke_wave_group)) %>% 
+  mutate(number_of_smoke_waves = (number_of_smoke_waves - 1))
+
+
+  
+treatment_centers <- left_join(treatment_centers, smoke_waves_count, by = "GEOID")
+treatment_county_counts <- left_join(treatment_county_counts, smoke_waves_count, by = "GEOID")
+
+```
+
+
+```{r}
+
+treatment_centers_ns <- st_drop_geometry(treatment_centers)
+write_csv(treatment_centers_ns, "~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/treatmemtc_wf.csv")
+
+```
+
+
+```{r}
+
+########## Individual Treatment Centers Level ###########
+
+treatment_centers <- st_transform(treatment_centers, 5070)
+counties <- st_transform(counties, 5070)
+treatment_centers$num_mons_exposed <- as.factor(treatment_centers$num_mons_exposed)
+treatment_centers$number_of_smoke_waves <- as.factor(treatment_centers$number_of_smoke_waves)
+
+wfpal<- c("#000000", "#FCC5C0", "#FA9FB5", "#F768A1", "#DD3497", "#AE017E", "#7A0177", "#49006A")
+
+
+# average pm concentration experienced by treatment center on factor level
+ggplot() + 
+  geom_sf(data = counties) +
+  geom_point(data = treatment_centers, 
+             aes(x = st_coordinates(geometry)[, 1], 
+                 y = st_coordinates(geometry)[, 2], 
+                 size = level_pm,
+                 colour = level_pm)) +
+  scale_size_manual(values = c(.10, .5, 1, 1.25, 1.5)) + 
+  scale_color_manual(values = wfpal) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, size = 20)) +
+  labs(title = "Wildfire Smoke PM2.5 Concentration by Buprenorphine Practitioner in 2018")
+
+ggsave("point_wf_pm.png", path = "~/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+# number of months in 2018 that hit exposure qualification by treatment center
+ggplot() + 
+  geom_sf(data = counties) +
+  geom_point(data = treatment_centers, 
+             aes(x = st_coordinates(geometry)[, 1], 
+                 y = st_coordinates(geometry)[, 2], 
+                 size = num_mons_exposed,
+                 colour = num_mons_exposed)) +
+  scale_size_manual(values = c(.10, .5, 1, 1.25, 1.5)) + 
+  scale_color_manual(values = wfpal) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, size = 20),
+         plot.subtitle = element_text(hjust = 0.5, size = 10)) +
+  labs(title = "Number of Months in 2018 Buprenorphine Practitioners Experienced Wildfire Smoke PM2.5 Exposure",
+       subtitle = "Exposure: a monthly avgerage pm2.5 > 5 ug/m3")
+
+ggsave("point_wf_exp.png", path = "~/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+
+# number of smoke waves experienced by treatment center in 2018
+ggplot() + 
+  geom_sf(data = counties) +
+  geom_point(data = treatment_centers, 
+             aes(x = st_coordinates(geometry)[, 1], 
+                 y = st_coordinates(geometry)[, 2], 
+                 size = number_of_smoke_waves,
+                 colour = number_of_smoke_waves)) +
+  scale_size_manual(values = c(.1, .25, .5, .75, 1, 1.25, 1.5, 1.75)) + 
+  scale_color_manual(values = wfpal) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5, size = 20),
+        plot.subtitle = element_text(hjust = 0.5, size = 10)) + 
+  labs(title = "Number of Smoke Waves Experienced by Buprenorphine Practitioner in 2018",
+       subtitle = "Smokewave defined as >=2 days with wf pm2.5 >15 ug/m3")
+
+ggsave("point_wf_smokew.png", path = "~/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+```
+
+```{r}
+
+########## County Level Maps ###########
+
+treatment_county_counts <- st_transform(treatment_county_counts, 5070)
+treatment_county_counts$num_mons_exposed <- as.factor(treatment_county_counts$num_mons_exposed)
+
+treatment_county_counts <- treatment_county_counts %>% mutate(level_sw = case_when(number_of_smoke_waves==0 ~ 0,
+                                             number_of_smoke_waves==1 | number_of_smoke_waves==2  ~ 1,
+                                             number_of_smoke_waves==3 | number_of_smoke_waves==4 ~ 2,
+                                             number_of_smoke_waves>4 ~ 3))
+treatment_county_counts$level_sw <- factor(treatment_county_counts$level_sw, levels=c(0,1,2,3), labels=c("0", "1-2", "3-4", "4+"))
+
+
+# average pm concentration by county on factor level
+ggplot() + geom_sf(data = treatment_county_counts, aes(fill = level_pm)) 
+
+# number of months in 2018 that hit exposure qualification by county
+ggplot() + geom_sf(data = treatment_county_counts, aes(fill = num_mons_exposed))
+
+# number of smoke waves experienced by counties in 2018
+ggplot() + geom_sf(data = treatment_county_counts, aes(fill = level_sw))
+
+```
+
+
+```{r}
+
+treatment_county_counts <- treatment_county_counts %>% mutate(centers_per_10000 = ifelse(is.na(centers_per_10000), 0, centers_per_10000))
+treatment_county_counts$centers_per_10000 <- round(treatment_county_counts$centers_per_10000, digits = 0)
+
+summary(treatment_county_counts$centers_per_10000)
+ # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+ #  0.000   0.000   1.000   1.763   2.000  11.00
+
+treatment_county_counts <- treatment_county_counts %>% mutate(level_tc = case_when(centers_per_10000==0 ~ 0,
+                                             centers_per_10000==1  ~ 1,
+                                             centers_per_10000==2 | centers_per_10000==3 ~ 2,
+                                             centers_per_10000>4 ~ 3))
+ 
+treatment_county_counts$level_tc <- factor(treatment_county_counts$level_tc, levels=c(0,1,2,3), labels=c("0", "1", "2-3", "4+"))
+
+
+```
+```{r}
+
+
+treatment_county_counts_ns <- st_drop_geometry(treatment_county_counts)
+write_csv(treatment_county_counts_ns, "~/casey-cohort/projects/opioids_extreme_weather/data/individual_metric_dfs/wf_county_counts.csv")
+
+```
+
+
+```{r}
+#biV 
+biv_data <- bi_class(treatment_county_counts, x = level_tc, y = level_sw, dim = 4)
+
+biv_data <- st_transform(biv_data, 5070)
+
+```
+
+
+```{r}
+biv_map <- ggplot() +
+  geom_sf(data = biv_data, mapping = aes(fill = bi_class), color = "white", size = 0.1, show.legend = FALSE) +
+  bi_scale_fill(pal = "DkViolet2", dim = 4, flip_axes = TRUE) +
+  bi_theme(base_size = 10) +
+  labs(title = "Number of Smokewaves Experienced x Number of Buprenorphine Practitioners in 2018", size = 14,
+       subtitle = "Smokewave defined as >=2 days with wf pm2.5 >15 ug/m3") +
+  theme(plot.title = element_text(face = "plain"),
+        plot.subtitle = element_text(face = "plain"))
+biv_map
+
+legend <- bi_legend(pal = "DkViolet2",
+                    dim = 4,
+                    xlab = "Number of Buprenorphine Practitioners",
+                    ylab = "Number of Smokewaves",
+                    size = 6,
+                    flip_axes = TRUE)
+
+finalPlot <- ggdraw() +
+  draw_plot(biv_map, 0, 0, 1, 1) +
+  draw_plot(legend, x=0, y=0, 0.6, 0.2) 
+  # annotate("text", x = .2735, y = .0452, label = "0", size = 2) + #base
+  # annotate("text", x = .2735, y = .0845, label = "1-2", size = 2) + #sw
+  # annotate("text", x = .2735, y = .119, label = "3-4", size = 2) + #sw
+  # annotate("text", x = .2735, y = .15, label = "4+", size = 2) + #sw
+  # annotate("text", x = .292, y = .045, label = "1", size = 2) + #TC
+  # annotate("text", x = .313, y = .045, label = "2-3", size = 2) + #TC
+  # annotate("text", x = .333, y = .045, label = "4+", size = 2) #TC 
+
+ggsave("biv_sw.png", path = "~/casey-cohort/projects/opioids_extreme_weather/maps", dpi=300, height=10, width=18, units="in")
+
+```
+

@@ -1,0 +1,45 @@
+#EB
+
+```{r}
+if(!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+pacman::p_load(here, folders, readr, dplyr, tidyr, stringr, purrr, ggplot2, ggmap, sf, tigris, tidyverse, sp, readr, data.table)
+```
+
+```{r}
+
+op_deaths <- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/op_deaths_since1999.csv")
+temp_rankings<- read_csv("~/casey-cohort/projects/opioids_extreme_weather/data/temp_rankings_since1999.csv")
+
+```
+
+```{r}
+
+op_deaths <- left_join(op_deaths, temp_rankings, by = "year")
+
+ggplot(op_deaths) +
+  geom_line(aes(x=year, y=deaths_per_100000)) +
+   labs(y = "Opioid Deaths per 10,000", x = NULL) +
+  theme_minimal() +
+ theme(
+    axis.title = element_text(size = 14),
+    plot.title = element_text(size = 16),
+    axis.text = element_text(size = 16)) 
+
+```
+
+```{r}
+  
+ggplot(op_deaths) + 
+  geom_point(aes(x=year, y=annual_temp_rankings)) + 
+  scale_y_reverse(limits = c(129, 1), labels = c(1, 50, 100, 129)) + 
+  labs(y = "Average Temperature Ranking", x = NULL) + 
+  annotate("rect", xmin = min(op_deaths$year), xmax = max(op_deaths$year), ymin = 1, ymax = 10, fill = "red", alpha = 0.2) + 
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 14), 
+    plot.title = element_text(size = 16),
+    axis.text = element_text(size = 16) 
+  )
+
+```
+
